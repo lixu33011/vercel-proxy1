@@ -1,0 +1,36 @@
+{
+  "name": "vercel-proxy",
+  "version": "1.0.0",
+  "description": "基于 Vercel Serverless 的代理服务，支持本地调试和云端部署",
+  "main": "api/proxy.js",
+  "scripts": {
+    "dev": "node local-server.js",
+    "start": "node local-server.js",
+    "deploy": "vercel deploy --prod",
+    "deploy:dev": "vercel",
+    "login": "vercel login",
+    "logs": "vercel logs",
+    "clean": "rm -rf node_modules && npm install"
+  },
+  "keywords": [
+    "vercel",
+    "proxy",
+    "serverless",
+    "express",
+    "http-proxy-middleware"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "http-proxy-middleware": "^2.0.6"
+  },
+  "devDependencies": {
+    "vercel": "^32.4.1"
+  },
+  "engines": {
+    "node": ">=14.0.0",
+    "npm": ">=6.0.0"
+  }
+}
