@@ -4,9 +4,9 @@ const cors = require('cors');
 
 const app = express();
 
-// 全局跨域配置（允许所有来源和凭证）
+// 全局跨域配置（适配 HTTPS 域名）
 app.use(cors({
-  origin: '*',
+  origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['*']
@@ -15,23 +15,19 @@ app.use(cors({
 // 动态代理核心中间件
 app.use((req, res, next) => {
   // 1. 解析请求路径，提取目标网站域名和路径
-  // 示例：/github.com/vercel → 域名：github.com，路径：/vercel
-  // 示例：/bilibili.com/video/BV1xx411c7mG → 域名：bilibili.com，路径：/video/BV1xx411c7mG
-  const fullPath = req.path.slice(1); // 去掉开头的 /
+  const fullPath = req.path.slice(1);
   const firstSlashIndex = fullPath.indexOf('/');
   
   let targetDomain, proxyPath;
   if (firstSlashIndex === -1) {
-    // 无后续路径（如 /github.com）
     targetDomain = fullPath;
     proxyPath = '/';
   } else {
-    // 有后续路径
     targetDomain = fullPath.substring(0, firstSlashIndex);
     proxyPath = fullPath.substring(firstSlashIndex);
   }
 
-  // 2. 校验域名格式（简单校验，避免非法请求）
+  // 校验域名格式
   if (!targetDomain || !targetDomain.includes('.')) {
     return res.status(400).json({
       success: false,
@@ -39,32 +35,79 @@ app.use((req, res, next) => {
     });
   }
 
-  // 3. 构建动态代理配置
+  // 2. 获取代理服务器的基础信息（强制 HTTPS）
+  const proxyHost = req.headers.host; // 代理域名：dl.330115558.xyz
+  const proxyProtocol = 'https'; // 强制使用 HTTPS 协议
+  const proxyBasePath = `/${targetDomain}`; // 代理路径前缀：/github.com
+
+  // 3. 构建动态代理配置（重点修复跳转问题）
   const proxyOptions = {
-    target: `https://${targetDomain}`, // 统一使用 HTTPS 代理（适配绝大多数网站）
-    changeOrigin: true, // 必开：模拟目标域名请求
-    secure: false, // 忽略 SSL 证书验证（本地调试）
+    target: `https://${targetDomain}`,
+    changeOrigin: true,
+    secure: false,
     pathRewrite: {
-      // 重写路径：去掉开头的 /域名 部分，只保留后续路径
       [`^/${targetDomain}`]: ''
     },
-    // 通用请求头：模拟浏览器，避免被反爬
+    // 重写请求头：传递正确的协议和主机
     onProxyReq: (proxyReq) => {
       proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-      proxyReq.setHeader('Referer', `https://${targetDomain}`);
-      proxyReq.removeHeader('X-Forwarded-For'); // 隐藏代理标识
+      proxyReq.setHeader('Referer', `${proxyProtocol}://${proxyHost}${proxyBasePath}`);
+      proxyReq.setHeader('Origin', `${proxyProtocol}://${proxyHost}${proxyBasePath}`);
+      proxyReq.setHeader('X-Forwarded-Proto', proxyProtocol); // 告诉目标服务器代理使用 HTTPS
+      proxyReq.removeHeader('X-Forwarded-For');
     },
-    // 弱化 CSP 和跨域限制，让页面更易加载
-    onProxyRes: (proxyRes) => {
+    // 核心修复：重写响应中的跳转和链接
+    onProxyRes: (proxyRes, req, res) => {
+      // ① 修复 Location 跳转头（解决登录跳转错误）
+      if (proxyRes.headers['location']) {
+        let location = proxyRes.headers['location'];
+        // 替换目标域名的绝对链接为代理链接
+        location = location.replace(
+          new RegExp(`^https?://${targetDomain}(.*)`),
+          `${proxyProtocol}://${proxyHost}${proxyBasePath}$1`
+        );
+        // 替换相对链接（如 /login → /github.com/login）
+        if (location.startsWith('/') && !location.startsWith(`/${targetDomain}`)) {
+          location = `${proxyBasePath}${location}`;
+        }
+        // 强制 HTTPS 协议
+        location = location.replace(/^http:/, 'https:');
+        proxyRes.headers['location'] = location;
+      }
+
+      // ② 删除严格的 CSP 头，避免资源拦截
       delete proxyRes.headers['content-security-policy'];
       delete proxyRes.headers['content-security-policy-report-only'];
-      proxyRes.headers['Access-Control-Allow-Origin'] = '*';
+
+      // ③ 重写响应内容中的链接（修复页面内的跳转链接）
+      const originalWrite = proxyRes.write;
+      let responseBody = '';
+      proxyRes.write = function (chunk) {
+        responseBody += chunk.toString();
+        return true;
+      };
+      proxyRes.on('end', function () {
+        // 替换页面内的所有目标域名链接为代理链接
+        let modifiedBody = responseBody.replace(
+          new RegExp(`https?://${targetDomain}(/[^"']*)?`, 'g'),
+          `${proxyProtocol}://${proxyHost}${proxyBasePath}$1`
+        );
+        // 强制所有链接使用 HTTPS
+        modifiedBody = modifiedBody.replace(/src="http:/g, 'src="https:');
+        modifiedBody = modifiedBody.replace(/href="http:/g, 'href="https:');
+        // 输出修改后的响应内容
+        originalWrite.call(proxyRes, modifiedBody);
+        proxyRes.end();
+      });
+
+      // ④ 跨域头配置
+      proxyRes.headers['Access-Control-Allow-Origin'] = `${proxyProtocol}://${proxyHost}`;
       proxyRes.headers['Access-Control-Allow-Credentials'] = 'true';
     },
-    logLevel: 'warn' // 仅打印警告日志，减少干扰
+    logLevel: 'warn'
   };
 
-  // 4. 动态挂载代理中间件并执行
+  // 动态挂载代理中间件
   createProxyMiddleware(proxyOptions)(req, res, next);
 });
 
@@ -79,5 +122,4 @@ app.use((err, req, res) => {
   });
 });
 
-// Vercel 导出
 module.exports = app;
